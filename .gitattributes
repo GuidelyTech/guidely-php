@@ -1,0 +1,10 @@
+# This directory is published as its own repository (github.com/parmarg/guidely-php, see
+# .github/workflows/release-php-sdk.yml), where these become root rules. Composer installs from
+# that repository's archives, so `export-ignore` keeps development files out of users' vendor/.
+/tests              export-ignore
+/docker             export-ignore
+/phpunit.xml.dist   export-ignore
+/.gitignore         export-ignore
+/.gitattributes     export-ignore
+
+*.php text eol=lf
