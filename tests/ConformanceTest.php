@@ -140,6 +140,19 @@ final class ConformanceTest extends TestCase
         self::assertNull(Values::textOf([1]));
     }
 
+    public function testInstantsAreStrict(): void
+    {
+        self::assertNull(Values::instantOf('2026-02-31'));
+        self::assertNull(Values::instantOf('2025-02-29'));
+        self::assertNull(Values::instantOf('2026-01-01T24:00'));
+        self::assertNull(Values::instantOf('2026-01-01T00:60'));
+        self::assertNull(Values::instantOf('2026-01-01T00:00:60Z'));
+        self::assertSame(1709164800000.0, Values::instantOf('2024-02-29'));
+        self::assertSame(-60589296000000.0, Values::instantOf('0050-01-01'));
+        self::assertSame(1767225600123.0, Values::instantOf('2026-01-01t00:00:00.123999z'));
+        self::assertSame(1767225600000.0, Values::instantOf('2026-01-01 01:00:00+01:00'));
+    }
+
     public function testJsonModelKeepsEmptyObjectsDistinct(): void
     {
         $v = Json::decode('{"a":{},"b":[],"c":{"0":"x"},"d":{"k":1}}');

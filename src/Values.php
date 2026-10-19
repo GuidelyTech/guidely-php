@@ -209,11 +209,11 @@ final class Values
         $second = (int) ($m[6] ?? 0);
         $frac = $m[7] ?? '';
         $tz = $m[8] ?? '';
-        if ($month < 1 || $month > 12 || $day < 1 || $day > 31 || $hour > 23 || $minute > 59 || $second > 60) {
+        // Validated explicitly: out-of-range parts are invalid, never rolled over.
+        if ($month < 1 || $month > 12 || $day < 1 || $day > self::daysInMonth($year, $month) || $hour > 23 || $minute > 59 || $second > 59) {
             return null;
         }
-        // Like Date.UTC, out-of-range days roll over into the next month.
-        $days = self::daysFromCivil($year, $month, 1) + $day - 1;
+        $days = self::daysFromCivil($year, $month, $day);
         $ms = (float) (($days * 86400 + $hour * 3600 + $minute * 60 + $second) * 1000);
         if ($frac !== '') {
             $ms += floor((float) ('0.' . $frac) * 1000);
@@ -225,7 +225,15 @@ final class Values
         return $ms;
     }
 
-    /** Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's algorithm). */
+    private static function daysInMonth(int $year, int $month): int
+    {
+        if ($month === 2) {
+            return ($year % 4 === 0 && $year % 100 !== 0) || $year % 400 === 0 ? 29 : 28;
+        }
+        return in_array($month, [4, 6, 9, 11], true) ? 30 : 31;
+    }
+
+    /** Days since 1970-01-01 of a proleptic Gregorian date with a literal year (H. Hinnant's algorithm). */
     private static function daysFromCivil(int $y, int $m, int $d): int
     {
         $y -= $m <= 2 ? 1 : 0;
