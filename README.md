@@ -331,6 +331,33 @@ docker run --rm -v "$PWD/sdks":/sdks -w /sdks/php guidely-php-test:8.1 composer 
 Repeat with `PHP_VERSION=8.3` to cover the newest supported release. The suite mounts all of
 `sdks/` because it reads the shared vectors in `sdks/conformance`.
 
+## Releasing
+
+Packagist only reads a `composer.json` at a repository root, so this directory is mirrored to
+[github.com/parmarg/guidely-php](https://github.com/parmarg/guidely-php), which is the repository
+registered on Packagist. Develop here; the mirror is distribution only (`.gitattributes` keeps
+`tests/` and `docker/` out of installs, and the conformance vectors stay in this monorepo).
+
+One-time setup:
+
+1. Create the empty public repository `parmarg/guidely-php`.
+2. Create a deploy key, add the public half to that repository (Settings → Deploy keys, **allow write
+   access**) and the private half to this repository as the secret `PHP_SDK_DEPLOY_KEY`:
+
+   ```bash
+   ssh-keygen -t ed25519 -C guidely-php-release -f guidely-php-key -N ""
+   ```
+
+3. Run the first release (below), then submit `https://github.com/parmarg/guidely-php` at
+   [packagist.org/packages/submit](https://packagist.org/packages/submit) and enable its GitHub hook
+   so later tags appear automatically.
+
+Each release: Actions → **Release PHP SDK** → Run workflow with the version (e.g. `0.1.0`). It is a
+dry run by default — tests, splits `sdks/php` and lists the files users would get, pushing
+nothing. Untick *dry run* (from `main`) to push the split to the mirror's `main`, tag it `v<version>`
+there and tag this repository `php-sdk-v<version>`. Versions are permanent on Packagist, so the
+workflow refuses one the mirror already has.
+
 ## License
 
 MIT

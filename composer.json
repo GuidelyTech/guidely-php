@@ -3,7 +3,7 @@
     "description": "Guidely feature flags and experiments for PHP: local evaluation, caching, sticky bucketing, remote evaluation and encrypted payloads.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["feature flags", "feature toggles", "experiments", "a/b testing", "remote config", "guidely"],
+    "keywords": ["feature flags", "feature toggles", "experiments", "ab testing", "remote config", "guidely"],
     "homepage": "https://guidelytech.com",
     "authors": [
         {
