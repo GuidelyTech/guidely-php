@@ -318,12 +318,18 @@ composer install
 composer test
 ```
 
-Without a local PHP, run the suite in Docker from the repository root:
+Without a local PHP, run the suite in Docker from the repository root. The image in
+[`docker/`](docker/Dockerfile) is the official CLI image plus Composer and `ext-apcu` enabled on the
+CLI, so the `ApcuCache` tests run too (on other images they are skipped):
 
 ```bash
-docker run --rm -v "$PWD/sdks":/sdks -w /sdks/php composer:2 composer install
-docker run --rm -v "$PWD/sdks":/sdks -w /sdks/php php:8.1-cli vendor/bin/phpunit
+docker build -t guidely-php-test:8.1 --build-arg PHP_VERSION=8.1 sdks/php/docker
+docker run --rm -v "$PWD/sdks":/sdks -w /sdks/php guidely-php-test:8.1 composer install
+docker run --rm -v "$PWD/sdks":/sdks -w /sdks/php guidely-php-test:8.1 composer test
 ```
+
+Repeat with `PHP_VERSION=8.3` to cover the newest supported release. The suite mounts all of
+`sdks/` because it reads the shared vectors in `sdks/conformance`.
 
 ## License
 
