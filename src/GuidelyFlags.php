@@ -44,8 +44,12 @@ final class GuidelyFlags
     private bool $bootstrapped = false;
     private ?string $lastError = null;
 
-    /** @var array<string, mixed> */
+    /** @var array<string, mixed> the `overrides` option / setOverrides() layer */
     private array $overrides;
+    /** @var array<string, mixed> dev overrides (spec §4.1), fixed at construction */
+    private array $devOverrides = [];
+    /** @var array<string, mixed> what evaluation uses: `overrides`, then dev overrides (later wins) */
+    private array $effectiveOverrides;
     private OverrideBehaviour $overrideBehaviour;
     private bool $offline;
 
@@ -72,6 +76,10 @@ final class GuidelyFlags
         $this->offline = $this->options->offline;
         $this->cacheKey = 'guidely-flags.' . substr(hash('sha256', implode('|', [$this->options->apiUrl, $this->options->sdkKey ?? '', $this->options->environment ?? ''])), 0, 40);
         $this->lastFlushAt = $this->now();
+        if ($this->options->devOverrides) {
+            $this->applyDevOverrides(DevOverrides::read($this->options->env));
+        }
+        $this->effectiveOverrides = array_replace($this->overrides, $this->devOverrides);
 
         if ($this->options->payload !== null) {
             try {
@@ -167,7 +175,7 @@ final class GuidelyFlags
                 $payload = $this->ensurePayload();
                 $results = $payload === null ? [] : Evaluator::evaluateAll($payload, $attrs, $this->now(), $this->options->stickyBucketService);
             }
-            foreach ($this->overrides as $key => $value) {
+            foreach ($this->effectiveOverrides as $key => $value) {
                 $key = (string) $key;
                 if ($this->overrideBehaviour !== OverrideBehaviour::RemoteOverLocal || !isset($results[$key]) || $results[$key]->reason === Reason::FLAG_NOT_FOUND) {
                     $results[$key] = EvaluationResult::override($key, $value);
@@ -190,13 +198,14 @@ final class GuidelyFlags
 
     /**
      * Replace the local overrides (flag key => value), optionally changing how they combine with
-     * the remote payload.
+     * the remote payload. Dev overrides (environment variables) stay and still win.
      *
      * @param array<string, mixed> $overrides
      */
     public function setOverrides(array $overrides, OverrideBehaviour|string|null $behaviour = null): void
     {
         $this->overrides = $overrides;
+        $this->effectiveOverrides = array_replace($overrides, $this->devOverrides);
         if ($behaviour !== null) {
             $this->overrideBehaviour = is_string($behaviour)
                 ? (OverrideBehaviour::tryFrom($behaviour) ?? throw new \InvalidArgumentException('Unknown override behaviour ' . $behaviour))
@@ -217,7 +226,7 @@ final class GuidelyFlags
     public function refresh(): bool
     {
         $this->remoteResults = [];
-        if ($this->offline || $this->options->sdkKey === null) {
+        if ($this->offline || $this->options->sdkKey === null || $this->overrideBehaviour === OverrideBehaviour::LocalOnly) {
             return false;
         }
         $this->bootstrapped = false;
@@ -268,12 +277,12 @@ final class GuidelyFlags
     /** @param array<array-key, mixed> $attrs */
     private function evaluateRaw(string $key, array $attrs): EvaluationResult
     {
-        $hasOverride = array_key_exists($key, $this->overrides);
+        $hasOverride = array_key_exists($key, $this->effectiveOverrides);
         if ($hasOverride && $this->overrideBehaviour !== OverrideBehaviour::RemoteOverLocal) {
-            return EvaluationResult::override($key, $this->overrides[$key]);
+            return EvaluationResult::override($key, $this->effectiveOverrides[$key]);
         }
         // From here on an override (remoteOverLocal) only fills in for flags missing remotely.
-        $missing = $hasOverride ? EvaluationResult::override($key, $this->overrides[$key]) : new EvaluationResult($key, null, Reason::FLAG_NOT_FOUND);
+        $missing = $hasOverride ? EvaluationResult::override($key, $this->effectiveOverrides[$key]) : new EvaluationResult($key, null, Reason::FLAG_NOT_FOUND);
         if ($this->overrideBehaviour === OverrideBehaviour::LocalOnly && $this->payload === null) {
             return $missing;
         }
@@ -312,7 +321,8 @@ final class GuidelyFlags
     private function track(EvaluationResult $result, array $attrs): void
     {
         $this->callHook($this->options->onFlagEvaluated, $result);
-        if ($this->options->reportUsage && $result->reason !== Reason::FLAG_NOT_FOUND && $result->reason !== Reason::ERROR) {
+        // Overrides are local, not served by Guidely: they are never counted (spec §4).
+        if ($this->options->reportUsage && !in_array($result->reason, [Reason::FLAG_NOT_FOUND, Reason::ERROR, Reason::OVERRIDE], true)) {
             $text = self::valueText($result->value);
             $id = $result->key . "\0" . ($result->variationId !== null ? 'v:' . $result->variationId : 't:' . $text);
             if (isset($this->usage[$id])) {
@@ -618,6 +628,21 @@ final class GuidelyFlags
 
     // ---------------------------------------------------------------- helpers
 
+    /** Takes dev overrides in, reports broken sources and warns once when any source is in use. */
+    private function applyDevOverrides(DevOverrides $dev): void
+    {
+        $this->devOverrides = $dev->values;
+        $this->overrideBehaviour = $dev->behaviour ?? $this->overrideBehaviour;
+        foreach ($dev->errors as $error) {
+            $this->report(new FlagsException($error));
+        }
+        if ($dev->sources === []) {
+            return;
+        }
+        $n = count($dev->values);
+        $this->warn(sprintf('Dev overrides from %s: %d flag%s, behaviour %s.', implode(', ', $dev->sources), $n, $n === 1 ? '' : 's', $this->overrideBehaviour->value));
+    }
+
     private function now(): float
     {
         return $this->options->clock !== null ? (float) ($this->options->clock)() : microtime(true);
@@ -656,6 +681,20 @@ final class GuidelyFlags
         }
         if (!$handled) {
             error_log('[guidely-php] ' . $error->getMessage());
+        }
+    }
+
+    /** A warning to the logger (`warning()`, else `error()`), or `error_log` without one. */
+    private function warn(string $message): void
+    {
+        $logger = $this->options->logger;
+        if ($logger === null) {
+            error_log('[guidely-php] ' . $message);
+            return;
+        }
+        try {
+            method_exists($logger, 'warning') ? $logger->warning('[guidely-php] ' . $message) : $logger->error('[guidely-php] ' . $message);
+        } catch (\Throwable) {
         }
     }
 }

@@ -59,6 +59,7 @@ final class ClientTest extends TestCase
             'sdkKey' => self::PK,
             'cache' => new InMemoryCache(fn () => $this->time),
             'clock' => fn () => $this->time,
+            'env' => static fn (string $name): ?string => null,
             'onError' => function (\Throwable $e): void {
                 $this->errors[] = $e;
             },
@@ -549,7 +550,7 @@ final class ClientTest extends TestCase
                 $this->messages[] = $message;
             }
         };
-        $flags = new GuidelyFlags(['sdkKey' => self::PK, 'httpClient' => FakeHttpClient::down(), 'cache' => false, 'logger' => $logger, 'reportUsage' => false]);
+        $flags = new GuidelyFlags(['sdkKey' => self::PK, 'httpClient' => FakeHttpClient::down(), 'cache' => false, 'logger' => $logger, 'reportUsage' => false, 'devOverrides' => false]);
         self::assertFalse($flags->isEnabled('x'));
         self::assertCount(1, $logger->messages);
         self::assertStringContainsString('Connection refused', $logger->messages[0]);

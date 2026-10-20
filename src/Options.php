@@ -31,6 +31,7 @@ final class Options
     /** @var array<string, mixed> */
     public readonly array $overrides;
     public readonly OverrideBehaviour $overrideBehaviour;
+    public readonly bool $devOverrides;
     /** @var array<string, mixed> */
     public readonly array $defaultAttributes;
     public readonly ?StickyBucketServiceInterface $stickyBucketService;
@@ -49,6 +50,11 @@ final class Options
     public readonly bool $remoteEval;
     /** @var (\Closure(): float)|null */
     public readonly ?\Closure $clock;
+    /**
+     * @internal
+     * @var (\Closure(string): ?string)|null
+     */
+    public readonly ?\Closure $env;
 
     /**
      * @param string|null $sdkKey environment public key (`pk_…`) or secret API key (`gly_sk_…`)
@@ -63,8 +69,15 @@ final class Options
      * @param callable(array<string, mixed>, EvaluationResult): void|null $trackingCallback
      * @param callable(EvaluationResult): void|null $onFlagEvaluated
      * @param callable(\Throwable): void|null $onError
-     * @param object|null $logger PSR-3 style logger (anything with `error(string, array)`)
+     * @param object|null $logger PSR-3 style logger (anything with `error(string, array)`; `warning()`
+     *        is used too when present)
      * @param callable(): float|null $clock current Unix time in seconds (tests)
+     * @param bool $devOverrides read dev overrides from the `GUIDELY_FLAG_OVERRIDES`,
+     *        `GUIDELY_FLAG_OVERRIDES_FILE` and `GUIDELY_FLAG_OVERRIDE_BEHAVIOUR` environment variables
+     *        (docs/feature-flags-spec.md §4.1); they win over `overrides`, and their behaviour over
+     *        `overrideBehaviour`
+     * @param callable(string): ?string|null $env @internal environment variable lookup for dev
+     *        overrides (tests); default `getenv()`, then `$_ENV`, then `$_SERVER`
      */
     public function __construct(
         ?string $sdkKey = null,
@@ -90,6 +103,8 @@ final class Options
         bool $offline = false,
         bool $remoteEval = false,
         ?callable $clock = null,
+        bool $devOverrides = true,
+        ?callable $env = null,
     ) {
         if ($sdkKey !== null && $projectId !== null && $sdkKey !== $projectId) {
             throw new \InvalidArgumentException('Pass either "sdkKey" or its alias "projectId", not both');
@@ -119,6 +134,7 @@ final class Options
         $this->decryptionKey = $decryptionKey;
         $this->overrides = $overrides;
         $this->overrideBehaviour = is_string($overrideBehaviour) ? self::behaviour($overrideBehaviour) : $overrideBehaviour;
+        $this->devOverrides = $devOverrides;
         $this->defaultAttributes = $defaultAttributes;
         $this->stickyBucketService = $stickyBucketService;
         $this->trackingCallback = $trackingCallback === null ? null : \Closure::fromCallable($trackingCallback);
@@ -135,6 +151,7 @@ final class Options
         $this->offline = $offline;
         $this->remoteEval = $remoteEval;
         $this->clock = $clock === null ? null : \Closure::fromCallable($clock);
+        $this->env = $env === null ? null : \Closure::fromCallable($env);
     }
 
     /**

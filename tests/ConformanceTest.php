@@ -6,8 +6,10 @@ namespace GuidelyTech\Flags\Tests;
 
 use GuidelyTech\Flags\EvaluationResult;
 use GuidelyTech\Flags\Evaluator;
+use GuidelyTech\Flags\GuidelyFlags;
 use GuidelyTech\Flags\Hash;
 use GuidelyTech\Flags\Json;
+use GuidelyTech\Flags\Overrides;
 use GuidelyTech\Flags\Sticky\InMemoryStickyBucketService;
 use GuidelyTech\Flags\Values;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -29,9 +31,9 @@ final class ConformanceTest extends TestCase
     }
 
     /** @return iterable<string, array{array}> */
-    private static function section(string $name, callable $label): iterable
+    private static function section(string $name, callable $label, ?array $from = null): iterable
     {
-        foreach (Json::asList(self::vectors()[$name] ?? null) as $i => $v) {
+        foreach (Json::asList(($from ?? self::vectors())[$name] ?? null) as $i => $v) {
             $v = Json::asMap($v);
             yield sprintf('#%d %s', $i, $label($v)) => [$v];
         }
@@ -55,6 +57,16 @@ final class ConformanceTest extends TestCase
     public static function cases(): iterable
     {
         return self::section('cases', fn (array $v) => $v['name']);
+    }
+
+    public static function overridesTextVectors(): iterable
+    {
+        return self::section('text', fn (array $v) => json_encode($v['input'], JSON_UNESCAPED_UNICODE), Json::asMap(self::vectors()['overrides'] ?? null));
+    }
+
+    public static function overridesCases(): iterable
+    {
+        return self::section('cases', fn (array $v) => $v['name'], Json::asMap(self::vectors()['overrides'] ?? null));
     }
 
     #[DataProvider('hashVectors')]
@@ -98,6 +110,50 @@ final class ConformanceTest extends TestCase
         }
     }
 
+    #[DataProvider('overridesTextVectors')]
+    public function testOverridesText(array $v): void
+    {
+        $actual = Overrides::parse($v['input']);
+        if ($v['expected'] === null) {
+            self::assertNull($actual, 'expected the text to be rejected');
+            return;
+        }
+        self::assertNotNull($actual, 'expected the text to parse');
+        $expected = Json::asMap($v['expected']); // `{}` decodes as stdClass
+        self::assertSame(array_map('strval', array_keys($expected)), array_map('strval', array_keys($actual)), 'keys (in order)');
+        foreach ($expected as $key => $value) {
+            self::assertTrue(Values::jsonEquals($value, $actual[$key]), "value of $key: expected " . Json::encode($value) . ', got ' . Json::encode($actual[$key]));
+        }
+    }
+
+    #[DataProvider('overridesCases')]
+    public function testOverridesCase(array $case): void
+    {
+        $http = new FakeHttpClient(static fn () => new \LogicException('no request expected'));
+        $errors = [];
+        $flags = new GuidelyFlags([
+            'payload' => $case['payload'] === null ? null : Json::asMap($case['payload']),
+            'overrides' => Json::asMap($case['overrides']),
+            'overrideBehaviour' => $case['behaviour'],
+            'cache' => false,
+            'httpClient' => $http,
+            'devOverrides' => false,
+            'reportUsage' => false,
+            'reportExposures' => false,
+            'onError' => function (\Throwable $e) use (&$errors): void {
+                $errors[] = $e->getMessage();
+            },
+        ]);
+        foreach (Json::asList($case['evaluations']) as $i => $evaluation) {
+            $evaluation = Json::asMap($evaluation);
+            $attributes = $evaluation['attributes'] ?? [];
+            $result = $flags->getDetails($evaluation['flag'], null, is_array($attributes) || is_object($attributes) ? $attributes : []);
+            $this->assertMatches(Json::asMap($evaluation['expected']), $result, sprintf('%s — evaluation #%d (%s)', $case['name'], $i, $evaluation['flag']));
+        }
+        self::assertSame([], $http->requests);
+        self::assertSame([], $errors);
+    }
+
     private function assertMatches(array $expected, EvaluationResult $result, string $context): void
     {
         $actual = $result->toArray();
@@ -121,6 +177,9 @@ final class ConformanceTest extends TestCase
         $evaluations = array_sum(array_map(fn ($c) => count(Json::asMap($c)['evaluations']), $cases));
         self::assertGreaterThanOrEqual(86, count($cases));
         self::assertGreaterThanOrEqual(501, $evaluations);
+        $overrides = Json::asMap(self::vectors()['overrides'] ?? null);
+        self::assertGreaterThanOrEqual(19, count(Json::asList($overrides['text'] ?? null)));
+        self::assertGreaterThanOrEqual(5, count(Json::asList($overrides['cases'] ?? null)));
     }
 
     public function testTextFormOfNumbers(): void

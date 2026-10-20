@@ -8,7 +8,7 @@ trip. The payload is cached between requests and revalidated in the background o
 * Targeting by attributes, segments, prerequisites, flag conditions and holdouts
 * Sticky bucketing, namespaces and bucket versions for experiments
 * File, APCu, in-memory and any PSR-16 (Redis, Memcached, Laravel, Symfony) payload cache
-* Encrypted payloads, remote evaluation, local overrides for tests
+* Encrypted payloads, remote evaluation, local overrides for tests and environment-variable overrides for CI
 * Usage counters and experiment exposures reported to Guidely
 
 Requirements: PHP 8.1 or later (64-bit) with `ext-json`, `ext-mbstring` and `ext-hash`.
@@ -180,12 +180,13 @@ Your own storage only needs `GuidelyTech\Flags\Cache\CacheInterface` (`get($key)
 | `decryptionKey` | — | The environment's decryption key, for encrypted payloads. |
 | `overrides` | `[]` | Flag key ⇒ value. |
 | `overrideBehaviour` | `localOverRemote` | `localOnly` (never fetch), `localOverRemote` (override wins), `remoteOverLocal` (override only for flags missing remotely). String or `OverrideBehaviour` enum. |
+| `devOverrides` | `true` | Read [dev overrides](#dev-overrides-ci) from `GUIDELY_FLAG_OVERRIDES*` environment variables. |
 | `defaultAttributes` | `[]` | Attributes merged under every call's attributes. |
 | `stickyBucketService` | — | A `StickyBucketServiceInterface` to keep users in their experiment variation. |
 | `trackingCallback` | — | `fn (array $experiment, EvaluationResult $result)`, called once per experiment, user and variation. |
 | `onFlagEvaluated` | — | `fn (EvaluationResult $result)` after every getter call. |
 | `onError` | — | `fn (Throwable $error)` for network, cache, decryption and callback errors. |
-| `logger` | — | A PSR-3 logger (anything with `error($message, $context)`). |
+| `logger` | — | A PSR-3 logger (anything with `error($message, $context)`; `warning()` is used when present). |
 | `reportUsage` | `true` | Send per-flag evaluation counts to Guidely. |
 | `reportExposures` | `true` | Send experiment exposures to Guidely. |
 | `timeoutSeconds` | `5` | HTTP timeout. |
@@ -253,9 +254,34 @@ $flags = new GuidelyFlags([
 $flags->setOverrides(['new-checkout' => false]);   // change them mid-test
 ```
 
-Overridden flags report reason `OVERRIDE`. Overrides apply to the flag you read; prerequisites and
-flag conditions of other flags still use the payload's values. To test against real rules without
-the network, pass a payload exported from the dashboard as `payload`.
+Overridden flags report reason `OVERRIDE` and are not counted in usage. Overrides apply to the flag
+you read; prerequisites and flag conditions of other flags still use the payload's values. To test
+against real rules without the network, pass a payload exported from the dashboard as `payload`.
+A `localOnly` client makes no requests at all and never reads a payload cached by an earlier run, so
+tests are hermetic.
+
+## Dev overrides (CI)
+
+CI and test runs can pin flags without changing the app. The client reads these environment
+variables once, when it is created (`getenv()`, then `$_ENV`, then `$_SERVER`):
+
+| Variable | Holds |
+|---|---|
+| `GUIDELY_FLAG_OVERRIDES` | `key:value` items separated by commas or newlines (`new-checkout:true,limit:5,theme:"dark"`; values are JSON when they parse, text otherwise), or a JSON object (`{"new-checkout": true}`) |
+| `GUIDELY_FLAG_OVERRIDES_FILE` | the path of a UTF-8 file holding the same text |
+| `GUIDELY_FLAG_OVERRIDE_BEHAVIOUR` | `localOnly`, `localOverRemote` or `remoteOverLocal`; replaces `overrideBehaviour` |
+
+A sample overrides file is in [Testing with flags in CI](../../docs/feature-flags.md#testing-with-flags-in-ci).
+
+```bash
+GUIDELY_FLAG_OVERRIDES='new-checkout:true' GUIDELY_FLAG_OVERRIDE_BEHAVIOUR=localOnly vendor/bin/phpunit
+```
+
+Per flag, the environment variable wins over the file, which wins over the `overrides` option;
+`setOverrides()` replaces only the option's values. When any variable is in use the client logs one
+warning naming it, so a variable left set in production is visible. A malformed value, an unreadable
+file or an unknown behaviour is reported through `onError` / the logger and ignored. Pass
+`'devOverrides' => false` to ignore all three variables.
 
 ## Remote evaluation
 
@@ -292,7 +318,8 @@ and the previous payload keeps serving. Requires `ext-openssl`.
 Unless `reportUsage` is off, the SDK counts evaluations per flag and served variation / value, and
 sends them with any experiment exposures to `POST /api/v1/sdk/flags/events`: at the end of the
 request (shutdown function and destructor), after 60 seconds of activity in long-running
-processes, or when you call `flush()`.
+processes, or when you call `flush()`. Overridden flags are not counted, and a `localOnly` client
+sends nothing.
 
 ## Evaluating without the client
 
