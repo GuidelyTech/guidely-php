@@ -361,13 +361,13 @@ Repeat with `PHP_VERSION=8.3` to cover the newest supported release. The suite m
 ## Releasing
 
 Packagist only reads a `composer.json` at a repository root, so this directory is mirrored to
-[github.com/parmarg/guidely-php](https://github.com/parmarg/guidely-php), which is the repository
+[github.com/GuidelyTech/guidely-php](https://github.com/GuidelyTech/guidely-php), which is the repository
 registered on Packagist. Develop here; the mirror is distribution only (`.gitattributes` keeps
 `tests/` and `docker/` out of installs, and the conformance vectors stay in this monorepo).
 
 One-time setup:
 
-1. Create the empty public repository `parmarg/guidely-php`.
+1. Create the empty public repository `GuidelyTech/guidely-php`.
 2. Create a deploy key, add the public half to that repository (Settings → Deploy keys, **allow write
    access**) and the private half to this repository as the secret `PHP_SDK_DEPLOY_KEY`:
 
@@ -375,7 +375,7 @@ One-time setup:
    ssh-keygen -t ed25519 -C guidely-php-release -f guidely-php-key -N ""
    ```
 
-3. Run the first release (below), then submit `https://github.com/parmarg/guidely-php` at
+3. Run the first release (below), then submit `https://github.com/GuidelyTech/guidely-php` at
    [packagist.org/packages/submit](https://packagist.org/packages/submit) and enable its GitHub hook
    so later tags appear automatically.
 
