@@ -17,6 +17,7 @@
     <source>
         <include>
             <directory>src</directory>
+            <directory>track</directory>
         </include>
     </source>
 </phpunit>

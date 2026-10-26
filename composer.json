@@ -1,9 +1,9 @@
 {
     "name": "guidelytech/guidely-php",
-    "description": "Guidely feature flags and experiments for PHP: local evaluation, caching, sticky bucketing, remote evaluation and encrypted payloads.",
+    "description": "Guidely for PHP: feature flags and experiments (local evaluation, caching, sticky bucketing, remote evaluation, encrypted payloads) and server-side Track Events (identify, track, group).",
     "type": "library",
     "license": "MIT",
-    "keywords": ["feature flags", "feature toggles", "experiments", "ab testing", "remote config", "guidely"],
+    "keywords": ["feature flags", "feature toggles", "experiments", "ab testing", "remote config", "analytics", "events", "guidely"],
     "homepage": "https://guidelytech.com",
     "authors": [
         {
@@ -28,7 +28,8 @@
     },
     "autoload": {
         "psr-4": {
-            "GuidelyTech\\Flags\\": "src/"
+            "GuidelyTech\\Flags\\": "src/",
+            "GuidelyTech\\Track\\": "track/"
         }
     },
     "autoload-dev": {

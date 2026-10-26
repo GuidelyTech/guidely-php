@@ -10,6 +10,8 @@ trip. The payload is cached between requests and revalidated in the background o
 * File, APCu, in-memory and any PSR-16 (Redis, Memcached, Laravel, Symfony) payload cache
 * Encrypted payloads, remote evaluation, local overrides for tests and environment-variable overrides for CI
 * Usage counters and experiment exposures reported to Guidely
+* Also in this package: [server-side Track Events](#track-events) (`GuidelyTrack`) — `identify`,
+  `track` and `group` from your backend
 
 Requirements: PHP 8.1 or later (64-bit) with `ext-json`, `ext-mbstring` and `ext-hash`.
 `ext-openssl` is needed only for encrypted payloads, and `ext-curl` is used when it is installed
@@ -357,10 +359,74 @@ $payload = Json::decode($json);
 $result = Evaluator::evaluate($payload, 'new-checkout', ['id' => 'u_123'], now: new DateTimeImmutable());
 ```
 
+## Track events
+
+`GuidelyTech\Track\GuidelyTrack` sends product data from your backend: who a user is (`identify`),
+what they did (`track`) and which account they belong to (`group`). Server events land next to
+browser and app events, so they work in Events, Funnels, Retention, audiences and guide targeting.
+It needs a secret key with the **`events:write`** scope (one key can carry `flags:read` too) — see
+[docs/server-sdks.md](../../docs/server-sdks.md).
+
+```php
+use GuidelyTech\Track\GuidelyTrack;
+
+$guidely = new GuidelyTrack(getenv('GUIDELY_SECRET_KEY'), environment: 'production'); // gly_sk_…
+
+$guidely->identify(['userId' => 'u_42', 'traits' => ['email' => 'ada@example.com', 'plan' => 'pro'], 'accountId' => 'acme']);
+$guidely->track(['userId' => 'u_42', 'event' => 'Report Exported', 'properties' => ['format' => 'csv', 'rows' => 1200]]);
+$guidely->track(['anonymousId' => $anonymousId, 'event' => 'Pricing Viewed']); // Guidely.anonymousId from the browser
+$guidely->group(['accountId' => 'acme', 'traits' => ['name' => 'Acme Inc', 'mrr' => 4200], 'userId' => 'u_42']);
+```
+
+Use the same `userId` your frontend passes to `Guidely.identify()`. Every message accepts an optional
+`timestamp` (`DateTimeInterface`, ISO 8601 string or Unix seconds). Calls never throw: an invalid one
+(empty `userId`, empty or over-long `event`, `group` without `accountId`, `traits` / `properties`
+that are not an associative array, a message over 32 KB) returns `false` and is reported to
+`onError` / the logger as a `TrackException` (`$e->errorCode`: `invalid_message`,
+`message_too_large`, `queue_full`, `delivery_failed` with `$e->status`, or `closed`; `$e->count`:
+messages dropped).
+
+**How sending works in PHP.** A PHP process does not outlive the request, so there is no
+background thread. Messages are queued in memory and sent synchronously: when `flushAt` messages
+are queued, when you call `flush()`, and at the end of the request (a shutdown function and the
+destructor; `close()` flushes too). Network errors, timeouts, `429` and `5xx` are retried inline with
+short sleeps — by default up to 3 retries of 0.1 s, 0.2 s and 0.4 s (±20 % jitter), with `Retry-After`
+honoured but capped at 1 s — so an outage adds at most a few seconds to that request instead of
+losing the data (the Node and Java SDKs, which run in the background, back off 1 s → 30 s and retry
+5 times). Other `4xx` answers drop the batch. Retries resend the same `messageId`s, so nothing is
+counted twice.
+
+The end-of-request flush runs before PHP-FPM finishes the response unless the response has already
+been sent. To keep it off your users' latency, call `fastcgi_finish_request()` first, or flush from
+your framework's after-response hook (Laravel's terminable middleware, Symfony's `kernel.terminate`
+event). In queue workers and long-running processes (Octane, RoadRunner, Swoole) call `flush()` at
+the end of each job or request.
+
+| Option | Default | |
+|---|---|---|
+| `environment` | — | **Required.** `development`, `staging` or `production`. |
+| `apiUrl` | `https://guidelytech.com` | |
+| `flushAt` | `100` | Send when this many messages are queued (a batch holds at most 100 messages and 500 KB). |
+| `maxQueueSize` | `10000` | Beyond it the oldest messages are dropped and reported. |
+| `timeoutSeconds` | `3` | Per request. |
+| `maxRetries` | `3` | Retries after the first attempt (`0` = none). |
+| `retryBaseDelayMs` | `100` | First backoff; doubles on every retry. |
+| `retryMaxDelayMs` | `1000` | Longest backoff and cap on `Retry-After`. |
+| `onError` | — | `fn (Throwable $e)`, receives every `TrackException`. |
+| `logger` | — | A PSR-3 logger. Without `onError` or `logger`, problems go to `error_log()`. |
+| `httpClient` | cURL / streams | The same `HttpClientInterface` as the flags client (Guzzle wrapper, fakes in tests). |
+| `flushOnShutdown` | `true` | Flush at the end of the request and when the client is destroyed. |
+
+Options are named arguments, so a config array can be spread:
+`new GuidelyTrack(...config('services.guidely_track'))`.
+
+The behaviour is pinned by the shared [Track Events vectors](../conformance/track-vectors.json),
+which the Node and Java SDKs run too.
+
 ## Development
 
 The evaluator follows `docs/feature-flags-spec.md` and passes the shared conformance vectors in
-`sdks/conformance/flag-vectors.json`.
+`sdks/conformance/flag-vectors.json`; `GuidelyTrack` passes `sdks/conformance/track-vectors.json`.
 
 ```bash
 cd sdks/php
