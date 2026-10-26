@@ -17,8 +17,9 @@ use GuidelyTech\Flags\Http\HttpResponse;
  * PHP processes are short-lived, so the client loads lazily: the payload lives in a cache shared
  * by every worker (with its ETag); when it is older than `cacheTtlSeconds` the next read
  * revalidates it with `If-None-Match`. If the API cannot be reached the last good payload keeps
- * serving. Getters never throw: problems go to `onError` / the logger and the caller's fallback
- * is returned.
+ * serving, and once it has failed repeatedly every worker stops trying for a while
+ * ({@see ServerHealth}). Getters never throw: problems go to `onError` / the logger and the
+ * caller's fallback is returned.
  */
 final class GuidelyFlags
 {
@@ -35,6 +36,7 @@ final class GuidelyFlags
     private readonly Options $options;
     private readonly HttpClientInterface $http;
     private readonly string $cacheKey;
+    private readonly ServerHealth $health;
 
     /** @var array<array-key, mixed>|null the payload in use */
     private ?array $payload = null;
@@ -75,6 +77,8 @@ final class GuidelyFlags
         $this->overrideBehaviour = $this->options->overrideBehaviour;
         $this->offline = $this->options->offline;
         $this->cacheKey = 'guidely-flags.' . substr(hash('sha256', implode('|', [$this->options->apiUrl, $this->options->sdkKey ?? '', $this->options->environment ?? ''])), 0, 40);
+        // Not $this->now(...): a closure over $this would keep the client alive past unset() (no flush).
+        $this->health = new ServerHealth($this->options->cache, $this->cacheKey . '.health', $this->options->clock ?? static fn (): float => microtime(true), $this->options->timeoutSeconds);
         $this->lastFlushAt = $this->now();
         if ($this->options->devOverrides) {
             $this->applyDevOverrides(DevOverrides::read($this->options->env));
@@ -220,8 +224,9 @@ final class GuidelyFlags
     }
 
     /**
-     * Fetch the payload now (ignoring the cache TTL and any bootstrap payload). Returns false when
-     * the fetch failed; the previous payload keeps serving and the error goes to `onError`.
+     * Fetch the payload now (ignoring the cache TTL, any bootstrap payload and an open outage
+     * circuit). Returns false when the fetch failed; the previous payload keeps serving and the
+     * error goes to `onError`.
      */
     public function refresh(): bool
     {
@@ -417,6 +422,9 @@ final class GuidelyFlags
             $this->payloadCheckedAt = (float) $entry['fetchedAt'];
             return true;
         }
+        if (!$force && !$this->mayRequest()) {
+            return false; // the API is down: serve the stale payload, or fallbacks, without waiting
+        }
         try {
             $headers = [];
             if ($usableEntry && $entry['etag'] !== null) {
@@ -519,6 +527,9 @@ final class GuidelyFlags
             $this->lastError = $this->offline ? 'offline' : 'no sdkKey';
             return null;
         }
+        if (!$this->mayRequest()) {
+            return null; // not remembered: tried again once the API is back
+        }
         try {
             $response = $this->request('POST', self::PATH_EVALUATE, $body);
             if ($response->status < 200 || $response->status >= 300) {
@@ -577,6 +588,9 @@ final class GuidelyFlags
             if ($this->offline || $this->options->sdkKey === null || $this->overrideBehaviour === OverrideBehaviour::LocalOnly) {
                 return;
             }
+            if ($this->health->waitSeconds() > 0) {
+                return; // dropped, as a failed send would be: don't hold the worker at shutdown
+            }
             $response = $this->request('POST', self::PATH_EVENTS, Json::encode($batch));
             if ($response->status < 200 || $response->status >= 300) {
                 throw $this->httpError('POST ' . self::PATH_EVENTS, $response);
@@ -606,7 +620,34 @@ final class GuidelyFlags
             $query = ['key' => $key];
         }
         $url = $this->options->apiUrl . $path . '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
-        return $this->http->send($method, $url, $headers, $body, $this->options->timeoutSeconds);
+        try {
+            $response = $this->http->send($method, $url, $headers, $body, $this->options->timeoutSeconds);
+        } catch (\Throwable $e) {
+            $this->health->failure();
+            throw $e;
+        }
+        if (ServerHealth::isServerFailure($response->status)) {
+            $this->health->failure(ServerHealth::parseRetryAfter($response->header('retry-after'), $this->now()));
+        } else {
+            $this->health->success();
+        }
+        return $response;
+    }
+
+    /**
+     * False while the outage circuit is open (shared by every worker through the cache): the
+     * caller serves what it has instead of sending. Not reported to `onError`, which already got
+     * the failures that opened it; `getLastError()` says when the next attempt is due.
+     */
+    private function mayRequest(): bool
+    {
+        $wait = $this->health->waitSeconds();
+        if ($wait <= 0) {
+            return true;
+        }
+        $failures = $this->health->failures();
+        $this->lastError = sprintf('Guidely API unavailable%s; next attempt in %ds', $failures > 0 ? sprintf(' (%d failed request%s in a row)', $failures, $failures === 1 ? '' : 's') : '', (int) ceil($wait));
+        return false;
     }
 
     private function httpError(string $what, HttpResponse $response): TransportException

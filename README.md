@@ -145,7 +145,8 @@ PHP processes are short-lived, so the client loads lazily:
 2. When the cached copy is older than `cacheTtlSeconds` (default 60), it revalidates it with
    `If-None-Match`; a `304` just refreshes the timestamp, so polling costs almost nothing.
 3. If the API cannot be reached, the stale payload keeps serving and every worker retries after
-   another `cacheTtlSeconds`.
+   another `cacheTtlSeconds`. Repeated failures stop all workers from trying for a while (see
+   [Outages](#outages)).
 4. `refresh()` forces a fetch; a long-running worker (Swoole, RoadRunner, queue consumers)
    revalidates by itself once its copy is older than the TTL.
 
@@ -166,6 +167,28 @@ $flags = new GuidelyFlags(['sdkKey' => 'pk_…', 'cache' => new ApcuCache()]);
 
 Your own storage only needs `GuidelyTech\Flags\Cache\CacheInterface` (`get($key)` and
 `set($key, $value, $ttlSeconds)`).
+
+## Outages
+
+Your app keeps working when Guidely is down. Every request the SDK makes reports its outcome to a
+small record (`{failures, openUntil}`) kept in the same cache as the payload, so all workers using
+that cache share it:
+
+* After 3 failed requests in a row (network error, timeout, `429` or `5xx`) no worker sends
+  anything for 5 s, doubling with each further failure up to 5 min (±20% jitter). A `Retry-After`
+  header (seconds or an HTTP date, capped at 1 hour) sets the wait directly.
+* While it is open, reads serve the cached payload however old it is, or your fallbacks when there
+  is none, immediately and without calling `onError` again (`getLastError()` says when the next
+  attempt is due). Remote evaluation requests and usage / exposure batches are held back too.
+* When the wait ends one worker tries again; any answer other than `429` / `5xx` closes the
+  circuit for everyone. `refresh()` always sends, so you can probe explicitly.
+* Within one process a failure also holds requests back for 5 s, so the getters of a single web
+  request never wait on the same failing server twice.
+
+Until the circuit opens, a cold worker with nothing cached can still wait up to `timeoutSeconds`
+(default 5) once. In latency-sensitive web requests consider a lower value, e.g.
+`'timeoutSeconds' => 2`, and a shared cache (`ApcuCache`, Redis) so most workers start warm. With
+`'cache' => false` the failure record only lives in the process.
 
 ## Options
 
@@ -189,7 +212,7 @@ Your own storage only needs `GuidelyTech\Flags\Cache\CacheInterface` (`get($key)
 | `logger` | — | A PSR-3 logger (anything with `error($message, $context)`; `warning()` is used when present). |
 | `reportUsage` | `true` | Send per-flag evaluation counts to Guidely. |
 | `reportExposures` | `true` | Send experiment exposures to Guidely. |
-| `timeoutSeconds` | `5` | HTTP timeout. |
+| `timeoutSeconds` | `5` | HTTP timeout (connect and total), per request. See [Outages](#outages). |
 | `httpClient` | cURL / streams | A `GuidelyTech\Flags\Http\HttpClientInterface` (e.g. to wrap Guzzle, or a fake in tests). |
 | `offline` | `false` | No network at all; the cached payload keeps serving. Also `setOffline()`. |
 | `remoteEval` | `false` | Let Guidely evaluate (see below). |
