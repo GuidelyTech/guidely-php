@@ -95,7 +95,7 @@ final class TrackConformanceTest extends TestCase
     {
         $http = new FakeHttpClient(static fn () => new HttpResponse(202, '{}'));
         $errors = [];
-        $client = self::client($http, $errors);
+        $client = self::client($http, $errors, $c['options'] ?? []);
         $client->{$c['call']}($c['args']);
         $client->flush();
         if ($c['expected'] === null) {
