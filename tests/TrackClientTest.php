@@ -74,6 +74,27 @@ final class TrackClientTest extends TestCase
         self::assertSame('https://guidely.example.com/api/v1/sdk/server/batch?environment=qa-eu', $http->requests[0]['url']);
     }
 
+    public function testSendsTheAppVersionWithTrackCalls(): void
+    {
+        $http = self::accepted();
+        $t = $this->client($http, ['appVersion' => ' 3.2.0 ']);
+        $t->track(['userId' => 'u_1', 'event' => 'A']);
+        $t->track(['userId' => 'u_1', 'event' => 'B', 'appVersion' => '3.3.0-beta']);
+        $t->identify(['userId' => 'u_1']);
+        $t->flush();
+        $batch = self::bodies($http)[0]['batch'];
+        self::assertSame('3.2.0', $batch[0]['appVersion']);
+        self::assertSame('3.3.0-beta', $batch[1]['appVersion']);
+        self::assertArrayNotHasKey('appVersion', $batch[2]);
+
+        $plain = self::accepted();
+        $u = $this->client($plain);
+        $u->track(['userId' => 'u_1', 'event' => 'A', 'appVersion' => '  ']);
+        $u->flush();
+        self::assertArrayNotHasKey('appVersion', self::bodies($plain)[0]['batch'][0]);
+        self::assertSame([], $this->errors);
+    }
+
     public function testVersion(): void
     {
         self::assertSame('0.3.0', GuidelyTrack::VERSION);

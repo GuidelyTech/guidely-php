@@ -378,6 +378,9 @@ $guidely->track(['anonymousId' => $anonymousId, 'event' => 'Pricing Viewed']); /
 $guidely->group(['accountId' => 'acme', 'traits' => ['name' => 'Acme Inc', 'mrr' => 4200], 'userId' => 'u_42']);
 ```
 
+To track by app version (Insights → App versions), pass `appVersion: '2.4.1'` to the constructor:
+every `track` carries it, and a message's own `'appVersion'` wins.
+
 Use the same `userId` your frontend passes to `Guidely.identify()`. Every message accepts an optional
 `timestamp` (`DateTimeInterface`, ISO 8601 string or Unix seconds). Calls never throw: an invalid one
 (empty `userId`, empty or over-long `event`, `group` without `accountId`, `traits` / `properties`

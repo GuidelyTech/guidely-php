@@ -52,6 +52,7 @@ final class GuidelyTrack
     private int $droppedSinceReport = 0;
     private bool $sending = false;
     private bool $closed = false;
+    private readonly ?string $appVersion;
 
     /**
      * @param string $secretKey a secret API key (`gly_sk_…`) with the `events:write` scope
@@ -68,6 +69,7 @@ final class GuidelyTrack
      * @param bool $flushOnShutdown flush at the end of the request (`register_shutdown_function`) and when the client is destroyed
      * @param callable(int): void|null $sleep @internal waits this many milliseconds (tests)
      * @param callable(): float|null $random @internal jitter source in [0, 1) (tests)
+     * @param string|null $appVersion your app's version, sent with every `track` (a message's own `appVersion` wins)
      * @throws \InvalidArgumentException when the key or environment is wrong
      */
     public function __construct(
@@ -86,7 +88,9 @@ final class GuidelyTrack
         bool $flushOnShutdown = true,
         ?callable $sleep = null,
         ?callable $random = null,
+        ?string $appVersion = null,
     ) {
+        $this->appVersion = Messages::version($appVersion);
         $key = trim($secretKey);
         if (!str_starts_with($key, 'gly_sk_')) {
             throw new \InvalidArgumentException('GuidelyTrack needs a secret API key (gly_sk_…) with the events:write scope');
@@ -147,10 +151,13 @@ final class GuidelyTrack
     /**
      * What a user (or an anonymous visitor: `anonymousId` instead of `userId`) did.
      *
-     * @param array{event: string, userId?: string|int|null, anonymousId?: string|null, properties?: array<string, mixed>|null, accountId?: string|int|null, timestamp?: \DateTimeInterface|string|int|float|null} $message
+     * @param array{event: string, userId?: string|int|null, anonymousId?: string|null, properties?: array<string, mixed>|null, accountId?: string|int|null, timestamp?: \DateTimeInterface|string|int|float|null, appVersion?: string|null} $message
      */
     public function track(array $message): bool
     {
+        if ($this->appVersion !== null && ($message['appVersion'] ?? null) === null) {
+            $message['appVersion'] = $this->appVersion;
+        }
         return $this->enqueue('track', $message);
     }
 

@@ -106,6 +106,7 @@ final class Messages
                 }
                 $properties = self::object('properties', $args['properties'] ?? null);
                 $accountId = self::id('accountId', $args['accountId'] ?? null, false);
+                $appVersion = self::version($args['appVersion'] ?? null);
                 if ($userId !== null) {
                     $m['userId'] = $userId;
                 }
@@ -118,6 +119,9 @@ final class Messages
                 }
                 if ($accountId !== null) {
                     $m['accountId'] = $accountId;
+                }
+                if ($appVersion !== null) {
+                    $m['appVersion'] = $appVersion;
                 }
                 break;
             case 'group':
@@ -140,6 +144,21 @@ final class Messages
         } catch (\JsonException $e) {
             throw new \InvalidArgumentException('could not be serialized to JSON (' . $e->getMessage() . ')', 0, $e);
         }
+    }
+
+    public const MAX_APP_VERSION_LENGTH = 200;
+
+    /** An app version: a non-blank string or number, trimmed and cut to 200 characters; anything else is left out. */
+    public static function version(mixed $value): ?string
+    {
+        if (!is_string($value) && !is_int($value) && !is_float($value)) {
+            return null;
+        }
+        $s = trim((string) $value);
+        if ($s === '') {
+            return null;
+        }
+        return mb_substr($s, 0, self::MAX_APP_VERSION_LENGTH, 'UTF-8');
     }
 
     /** Length in UTF-16 code units, like JavaScript's `length` (and the server's validation). */
