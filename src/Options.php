@@ -18,7 +18,9 @@ use GuidelyTech\Flags\Sticky\StickyBucketServiceInterface;
 final class Options
 {
     public const DEFAULT_API_URL = 'https://guidelytech.com';
+    /** The built-in environments; projects can add their own (`qa`, `uat`…), matching ENVIRONMENT_KEY. */
     public const ENVIRONMENTS = ['development', 'staging', 'production'];
+    public const ENVIRONMENT_KEY = '/^[a-z][a-z0-9-]{0,29}$/';
 
     public readonly ?string $sdkKey;
     public readonly string $apiUrl;
@@ -59,7 +61,7 @@ final class Options
     /**
      * @param string|null $sdkKey environment public key (`pk_…`) or secret API key (`gly_sk_…`)
      * @param string|null $projectId alias of `sdkKey`
-     * @param string|null $environment `development` / `staging` / `production`; required with a `gly_sk_` key
+     * @param string|null $environment environment key (`development`, `staging`, `production` or one you added, e.g. `qa`); required with a `gly_sk_` key
      * @param CacheInterface|object|false|null $cache payload cache: a CacheInterface, any PSR-16 cache,
      *        `false` for none (memory only), or null for the default {@see FileCache}
      * @param array<array-key, mixed>|string|null $payload bootstrap payload (array or JSON); when given the
@@ -112,11 +114,11 @@ final class Options
         $key = $sdkKey ?? $projectId;
         $this->sdkKey = $key === null || trim($key) === '' ? null : trim($key);
         $this->apiUrl = rtrim($apiUrl, '/');
-        if ($environment !== null && !in_array($environment, self::ENVIRONMENTS, true)) {
-            throw new \InvalidArgumentException('"environment" must be one of ' . implode(', ', self::ENVIRONMENTS));
+        if ($environment !== null && preg_match(self::ENVIRONMENT_KEY, $environment) !== 1) {
+            throw new \InvalidArgumentException('"environment" must be an environment key: development, staging, production or one you added (e.g. qa), as shown in Settings → Environments');
         }
         if ($this->sdkKey !== null && str_starts_with($this->sdkKey, 'gly_sk_') && $environment === null) {
-            throw new \InvalidArgumentException('A secret API key (gly_sk_…) needs the "environment" option: development, staging or production');
+            throw new \InvalidArgumentException('A secret API key (gly_sk_…) needs the "environment" option: development, staging, production or one you added');
         }
         $this->environment = $environment;
         if ($cacheTtlSeconds < 0) {

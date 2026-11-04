@@ -30,7 +30,9 @@ final class GuidelyTrack
     public const SDK_NAME = GuidelyFlags::SDK_NAME;
     public const VERSION = GuidelyFlags::VERSION;
     public const DEFAULT_API_URL = 'https://guidelytech.com';
+    /** The built-in environments; projects can add their own (`qa`, `uat`…), matching ENVIRONMENT_KEY. */
     public const ENVIRONMENTS = ['development', 'staging', 'production'];
+    public const ENVIRONMENT_KEY = '/^[a-z][a-z0-9-]{0,29}$/';
     private const PATH_BATCH = '/api/v1/sdk/server/batch';
 
     private readonly string $url;
@@ -53,7 +55,7 @@ final class GuidelyTrack
 
     /**
      * @param string $secretKey a secret API key (`gly_sk_…`) with the `events:write` scope
-     * @param string $environment `development`, `staging` or `production`
+     * @param string $environment the environment key: `development`, `staging`, `production` or one you added (`qa`)
      * @param int $flushAt send when this many messages are queued (a batch holds at most 100 messages and 500 KB)
      * @param int $maxQueueSize most messages held; beyond it the oldest are dropped and reported
      * @param float $timeoutSeconds timeout of one request (connect and total)
@@ -89,8 +91,8 @@ final class GuidelyTrack
         if (!str_starts_with($key, 'gly_sk_')) {
             throw new \InvalidArgumentException('GuidelyTrack needs a secret API key (gly_sk_…) with the events:write scope');
         }
-        if (!in_array($environment, self::ENVIRONMENTS, true)) {
-            throw new \InvalidArgumentException('"environment" must be one of ' . implode(', ', self::ENVIRONMENTS));
+        if (preg_match(self::ENVIRONMENT_KEY, $environment) !== 1) {
+            throw new \InvalidArgumentException('"environment" must be an environment key: development, staging, production or one you added (e.g. qa), as shown in Settings → Environments');
         }
         if ($flushAt < 1 || $maxQueueSize < 1 || $maxRetries < 0 || $retryBaseDelayMs < 0 || $retryMaxDelayMs < 0) {
             throw new \InvalidArgumentException('flushAt and maxQueueSize must be >= 1; maxRetries and the retry delays >= 0');

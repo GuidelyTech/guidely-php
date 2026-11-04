@@ -55,7 +55,7 @@ final class TrackClientTest extends TestCase
 
     public function testNeedsASecretKeyAndEnvironment(): void
     {
-        foreach ([['pk_prod_1', 'production'], ['', 'production'], ['gly_sk_1', 'prod']] as [$key, $env]) {
+        foreach ([['pk_prod_1', 'production'], ['', 'production'], ['gly_sk_1', 'Production'], ['gly_sk_1', '']] as [$key, $env]) {
             try {
                 new GuidelyTrack($key, $env, flushOnShutdown: false);
                 self::fail("accepted $key / $env");
@@ -63,6 +63,15 @@ final class TrackClientTest extends TestCase
                 self::assertTrue(true);
             }
         }
+    }
+
+    public function testAcceptsCustomEnvironments(): void
+    {
+        $http = self::accepted();
+        $client = $this->client($http, ['apiUrl' => 'https://guidely.example.com', 'environment' => 'qa-eu']);
+        self::assertTrue($client->track(['userId' => 'u_42', 'event' => 'Signed Up']));
+        self::assertTrue($client->flush());
+        self::assertSame('https://guidely.example.com/api/v1/sdk/server/batch?environment=qa-eu', $http->requests[0]['url']);
     }
 
     public function testVersion(): void

@@ -58,7 +58,7 @@ name the environment:
 ```php
 $flags = new GuidelyFlags([
     'sdkKey' => getenv('GUIDELY_SECRET_KEY'),   // gly_sk_…
-    'environment' => 'production',              // development | staging | production
+    'environment' => 'production',              // development | staging | production | a key you added, e.g. qa
 ]);
 ```
 
@@ -197,7 +197,7 @@ Until the circuit opens, a cold worker with nothing cached can still wait up to 
 | Option | Default | Meaning |
 |---|---|---|
 | `sdkKey` (alias `projectId`) | — | `pk_…` public key or `gly_sk_…` secret key. Without one the SDK only serves `payload` / `overrides`. |
-| `environment` | — | `development`, `staging` or `production`. Required with a `gly_sk_` key. |
+| `environment` | — | The environment key: `development`, `staging`, `production` or one you added (`qa`). Required with a `gly_sk_` key. |
 | `apiUrl` | `https://guidelytech.com` | API origin (self-hosted / testing). |
 | `cacheTtlSeconds` | `60` | Age after which the cached payload is revalidated. |
 | `cache` | `FileCache` | A `CacheInterface`, any PSR-16 cache, or `false` for memory only. |
