@@ -97,7 +97,7 @@ final class TrackClientTest extends TestCase
 
     public function testVersion(): void
     {
-        self::assertSame('0.3.0', GuidelyTrack::VERSION);
+        self::assertSame('0.4.0', GuidelyTrack::VERSION);
         self::assertSame(GuidelyFlags::VERSION, GuidelyTrack::VERSION);
         self::assertSame('guidely-php', GuidelyTrack::SDK_NAME);
     }
@@ -118,9 +118,9 @@ final class TrackClientTest extends TestCase
         self::assertSame('https://guidely.example.com/api/v1/sdk/server/batch?environment=staging', $req['url']);
         self::assertSame('Bearer gly_sk_test_123', $req['headers']['Authorization']);
         self::assertSame('application/json', $req['headers']['Content-Type']);
-        self::assertStringStartsWith('guidely-php/0.3.0 PHP/', $req['headers']['User-Agent']);
+        self::assertStringStartsWith('guidely-php/0.4.0 PHP/', $req['headers']['User-Agent']);
         $body = self::bodies($http)[0];
-        self::assertSame(['name' => 'guidely-php', 'version' => '0.3.0'], $body['sdk']);
+        self::assertSame(['name' => 'guidely-php', 'version' => '0.4.0'], $body['sdk']);
         self::assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/', $body['sentAt']);
         self::assertSame(['identify', 'track', 'group'], array_column($body['batch'], 'type'));
         self::assertCount(3, array_unique(array_column($body['batch'], 'messageId')));

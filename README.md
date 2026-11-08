@@ -11,7 +11,8 @@ trip. The payload is cached between requests and revalidated in the background o
 * Encrypted payloads, remote evaluation, local overrides for tests and environment-variable overrides for CI
 * Usage counters and experiment exposures reported to Guidely
 * Also in this package: [server-side Track Events](#track-events) (`GuidelyTrack`) — `identify`,
-  `track` and `group` from your backend
+  `track` and `group` from your backend — and [error monitoring](#error-monitoring)
+  (`captureException`, breadcrumbs, uncaught exception / PHP error / fatal error handlers) with Sentry's API
 
 Requirements: PHP 8.1 or later (64-bit) with `ext-json`, `ext-mbstring` and `ext-hash`.
 `ext-openssl` is needed only for encrypted payloads, and `ext-curl` is used when it is installed
@@ -425,6 +426,64 @@ Options are named arguments, so a config array can be spread:
 
 The behaviour is pinned by the shared [Track Events vectors](../conformance/track-vectors.json),
 which the Node and Java SDKs run too.
+
+## Error monitoring
+
+The same `GuidelyTrack` client reports errors the way Sentry's SDK does, so a PHP app can drop
+Sentry and keep its tags, breadcrumbs and previous-exception chains
+([docs/error-monitoring/sdks.md](../../docs/error-monitoring/sdks.md)). Errors are `exception`
+messages on the batch path, sent with the end-of-request flush; crashes and fatal errors at once.
+
+```php
+use GuidelyTech\Track\ErrorHandler;
+use GuidelyTech\Track\ErrorOptions;
+use GuidelyTech\Track\Level;
+
+$guidely = new GuidelyTrack(getenv('GUIDELY_SECRET_KEY'), environment: 'production', appVersion: '2.4.1', errors: new ErrorOptions(
+    projectRoot: dirname(__DIR__),                 // frame paths relative to it, so issues group across deploys
+    ignoreExceptions: [NotFoundHttpException::class],
+    ignoreErrors: ['Connection reset by peer'],    // substrings; ignorePatterns: regular expressions
+    beforeSend: fn (array $event, ?\Throwable $e) => $event,
+));
+ErrorHandler::register($guidely);                  // optional: uncaught exceptions, PHP warnings, fatal errors
+
+try {
+    $checkout->pay($cart);
+} catch (PaymentException $e) {
+    $guidely->captureException($e, ['userId' => 'u_42', 'tags' => ['area' => 'checkout'], 'extra' => ['cartSize' => 3]]);
+}
+$guidely->captureMessage('Stripe webhook retried 3 times', Level::Warning);
+$guidely->setTag('region', 'eu-1');
+$guidely->addBreadcrumb(['category' => 'db.query', 'message' => 'SELECT … FROM orders']);
+```
+
+* Frames come from `getTrace()` plus the throw site, paired the way Sentry PHP pairs them (each
+  location runs in the function of the entry after it), with the `getPrevious()` chain (up to 20).
+  Paths under `vendor/` are library code (`inAppExclude` / `inAppInclude` adjust it); arguments are
+  never read. Contexts carry `PHP_VERSION`, the SAPI and the OS.
+* `ErrorHandler::register()` chains whatever handlers were installed before: uncaught exceptions are
+  crashes (`fatal`, `handled: false`, mechanism `uncaught`) passed on to the previous handler (or
+  rethrown, so PHP still logs them); warnings and user errors that `error_reporting()` lets through
+  become events, notices and deprecations breadcrumbs (`eventLevels:` changes that); `E_ERROR`,
+  `E_PARSE`, `E_CORE_ERROR` and `E_COMPILE_ERROR` are caught from `error_get_last()` at shutdown
+  (mechanism `fatal_error`). In web requests events carry the request from `$_SERVER`, without
+  cookies or credential headers.
+* The SDK does not depend on PSR-15; a middleware in your app is a few lines:
+
+```php
+public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+{
+    try {
+        return $handler->handle($request);
+    } catch (\Throwable $e) {
+        $this->guidely->captureException($e, RequestContext::fromPsr7($request) + ['handled' => false, 'mechanism' => 'request']);
+        throw $e;
+    }
+}
+```
+
+Laravel: call `captureException()` from the exception handler's `reportable()` callback; Symfony:
+from a `kernel.exception` listener. In queue workers call `flush()` after each job.
 
 ## Development
 

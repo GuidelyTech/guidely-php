@@ -6,7 +6,8 @@ namespace GuidelyTech\Track;
 
 /**
  * Validation and serialization of identify / track / group messages (docs/server-sdks.md,
- * sdks/conformance/track-vectors.json → messages).
+ * sdks/conformance/track-vectors.json → messages) and of `exception` messages
+ * (docs/error-monitoring/sdks.md).
  *
  * @internal
  */
@@ -15,6 +16,8 @@ final class Messages
     public const MAX_BATCH_MESSAGES = 100;
     public const MAX_BATCH_BYTES = 500000;
     public const MAX_MESSAGE_BYTES = 32768;
+    /** An `exception` message: up to 64 KB of `detail` plus its 8 KB of properties. */
+    public const MAX_EXCEPTION_MESSAGE_BYTES = 81920;
     public const MAX_EVENT_LENGTH = 120;
     public const MAX_ID_LENGTH = 256;
 
@@ -73,9 +76,10 @@ final class Messages
             throw new \InvalidArgumentException("$type() needs an array argument");
         }
         $ts = $args['timestamp'] ?? null;
+        $presetId = $type === 'exception' && is_string($args['messageId'] ?? null) ? $args['messageId'] : null;
         $m = [
             'type' => $type,
-            'messageId' => self::newMessageId(),
+            'messageId' => $presetId ?? self::newMessageId(),
             'timestamp' => self::formatTimestamp($ts === null ? $now : self::toDateTime($ts)),
         ];
         switch ($type) {
@@ -134,6 +138,26 @@ final class Messages
                 }
                 if ($userId !== null) {
                     $m['userId'] = $userId;
+                }
+                break;
+            case 'exception':
+                $userId = self::id('userId', $args['userId'] ?? null, false);
+                $anonymousId = self::id('anonymousId', $args['anonymousId'] ?? null, false);
+                $accountId = self::id('accountId', $args['accountId'] ?? null, false);
+                $appVersion = self::version($args['appVersion'] ?? null);
+                $properties = self::object('properties', $args['properties'] ?? null);
+                if ($properties === null) {
+                    throw new \InvalidArgumentException('exception needs properties');
+                }
+                $detail = self::object('detail', $args['detail'] ?? null);
+                foreach (['userId' => $userId, 'anonymousId' => $anonymousId, 'accountId' => $accountId, 'appVersion' => $appVersion] as $k => $v) {
+                    if ($v !== null) {
+                        $m[$k] = $v;
+                    }
+                }
+                $m['properties'] = $properties;
+                if ($detail !== null) {
+                    $m['detail'] = $detail;
                 }
                 break;
             default:

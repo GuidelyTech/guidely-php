@@ -12,7 +12,7 @@ final class TrackException extends \RuntimeException
 {
     /** A call was invalid (missing userId, empty or over-long event, group without accountId…) and dropped. */
     public const INVALID_MESSAGE = 'invalid_message';
-    /** A message serialized to more than 32 KB and was dropped. */
+    /** A message serialized to more than 32 KB (an `exception` message: 80 KB) and was dropped. */
     public const MESSAGE_TOO_LARGE = 'message_too_large';
     /** The queue held `maxQueueSize` messages; the oldest were dropped. */
     public const QUEUE_FULL = 'queue_full';

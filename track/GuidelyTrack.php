@@ -23,6 +23,12 @@ use GuidelyTech\Flags\Http\HttpClientInterface;
  * most 3 retries of 0.1 s, 0.2 s, 0.4 s; `Retry-After` is honoured up to 1 s), so an outage adds a
  * bounded delay to the request instead of losing data or blocking for minutes.
  *
+ * It also reports errors (`captureException`, `captureMessage`) the way Sentry's SDK does — scope
+ * (`setTag`, `setUser`, `addBreadcrumb`…), {@see ErrorOptions} (`beforeSend`, `sampleRate`, ignore
+ * lists, in-app paths) and an opt-in {@see ErrorHandler} for uncaught exceptions, PHP errors and
+ * fatal errors — as `exception` messages on the same batch path. They are sent with the end-of-request
+ * flush (crashes and fatal errors at once).
+ *
  * Calls never throw: invalid calls are dropped and reported to `onError` / the logger.
  */
 final class GuidelyTrack
@@ -53,6 +59,7 @@ final class GuidelyTrack
     private bool $sending = false;
     private bool $closed = false;
     private readonly ?string $appVersion;
+    private readonly ErrorCapture $errors;
 
     /**
      * @param string $secretKey a secret API key (`gly_sk_…`) with the `events:write` scope
@@ -70,6 +77,7 @@ final class GuidelyTrack
      * @param callable(int): void|null $sleep @internal waits this many milliseconds (tests)
      * @param callable(): float|null $random @internal jitter source in [0, 1) (tests)
      * @param string|null $appVersion your app's version, sent with every `track` (a message's own `appVersion` wins)
+     * @param ErrorOptions|null $errors error monitoring settings (`beforeSend`, `sampleRate`, `ignoreErrors`, `release`…)
      * @throws \InvalidArgumentException when the key or environment is wrong
      */
     public function __construct(
@@ -89,6 +97,7 @@ final class GuidelyTrack
         ?callable $sleep = null,
         ?callable $random = null,
         ?string $appVersion = null,
+        ?ErrorOptions $errors = null,
     ) {
         $this->appVersion = Messages::version($appVersion);
         $key = trim($secretKey);
@@ -120,6 +129,7 @@ final class GuidelyTrack
             }
         } : \Closure::fromCallable($sleep);
         $this->random = $random === null ? static fn (): float => mt_rand() / (mt_getrandmax() + 1) : \Closure::fromCallable($random);
+        $this->errors = new ErrorCapture($errors ?? new ErrorOptions(), $environment, $this->appVersion, $this->random);
         if ($flushOnShutdown) {
             // A weak reference: the shutdown function must not keep the client alive past unset()
             // (its destructor flushes then).
@@ -198,6 +208,129 @@ final class GuidelyTrack
         return count($this->queue);
     }
 
+    // --- error monitoring -----------------------------------------------------------------------
+
+    /**
+     * Reports a caught exception (level `error`, `handled: true`) with its previous exceptions,
+     * breadcrumbs and the client's scope. Never throws.
+     *
+     * @param array{userId?: string|int|null, anonymousId?: string|null, accountId?: string|int|null, tags?: array<string, string>, extra?: array<string, mixed>, level?: Level|string, fingerprint?: list<string>, contexts?: array<string, array<string, mixed>|null>, request?: array{method?: string, url?: string, headers?: array<string, string|list<string>>}, transaction?: string, handled?: bool, mechanism?: string} $context
+     *     any other key is kept as an event property
+     * @return string|null the event id (`messageId`), or null when it was dropped (sampled out,
+     *     ignored, `beforeSend` returned null, invalid, or the client is closed)
+     */
+    public function captureException(\Throwable $exception, array $context = []): ?string
+    {
+        $how = [
+            'source' => 'manual',
+            'mechanism' => is_string($context['mechanism'] ?? null) && $context['mechanism'] !== '' ? $context['mechanism'] : 'generic',
+            'handled' => is_bool($context['handled'] ?? null) ? $context['handled'] : true,
+        ];
+        return $this->capture($exception, null, null, $context, $how);
+    }
+
+    /**
+     * Reports a message (level `info` by default); events group by the message.
+     *
+     * @param array<string, mixed> $context as for captureException()
+     */
+    public function captureMessage(string $message, Level|string $level = Level::Info, array $context = []): ?string
+    {
+        $context['level'] = Level::of($level) ?? Level::Info;
+        return $this->capture(null, null, $message, $context, ['source' => 'message', 'mechanism' => null, 'handled' => true]);
+    }
+
+    /** A tag on every later error (null removes it). */
+    public function setTag(string $key, ?string $value): void
+    {
+        $this->errors->setTag($key, $value);
+    }
+
+    /** @param array<string, string> $tags */
+    public function setTags(array $tags): void
+    {
+        foreach ($tags as $k => $v) {
+            $this->errors->setTag((string) $k, $v === null ? null : (string) $v);
+        }
+    }
+
+    /** Extra data on every later error (null removes it). */
+    public function setExtra(string $key, mixed $value): void
+    {
+        $this->errors->setExtra($key, $value);
+    }
+
+    /** @param array<string, mixed> $extras */
+    public function setExtras(array $extras): void
+    {
+        foreach ($extras as $k => $v) {
+            $this->errors->setExtra((string) $k, $v);
+        }
+    }
+
+    /**
+     * A named context on every later error (null removes it).
+     *
+     * @param array<string, mixed>|null $context
+     */
+    public function setContext(string $name, ?array $context): void
+    {
+        $this->errors->setContext($name, $context);
+    }
+
+    /**
+     * The user later errors are attributed to (their `userId` and `detail.user`); null clears it. A
+     * capture's own `userId` wins. Unlike the browser SDK this sends no `identify`: call
+     * identify() for traits.
+     *
+     * @param array{id?: string|int|null, email?: string|null, username?: string|null}|null $user
+     */
+    public function setUser(?array $user): void
+    {
+        $this->errors->setUser($user);
+    }
+
+    /**
+     * Records a breadcrumb; the last 100 ride along with every error.
+     *
+     * @param array{category?: string, message?: string, level?: Level|string, type?: string, data?: array<string, mixed>, timestamp?: \DateTimeInterface|float|int} $breadcrumb
+     */
+    public function addBreadcrumb(array $breadcrumb): void
+    {
+        try {
+            $this->errors->addBreadcrumb($breadcrumb, new \DateTimeImmutable('now'));
+        } catch (\Throwable $e) {
+            $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'addBreadcrumb() failed: ' . $e->getMessage(), 1, null, $e));
+        }
+    }
+
+    /**
+     * Builds and queues one error. Never throws.
+     *
+     * @internal used by {@see ErrorHandler}
+     * @param array<string, mixed> $context
+     * @param array{source: string, mechanism: ?string, handled: bool, level?: ?Level} $how
+     * @param list<array{file: ?string, line: ?int, function: ?string}>|null $frames
+     */
+    public function capture(?\Throwable $exception, ?string $type, ?string $message, array $context, array $how, ?array $frames = null): ?string
+    {
+        try {
+            if ($this->closed) {
+                $this->report(new TrackException(TrackException::CLOSED, 'An error was captured after close(); it was dropped'));
+                return null;
+            }
+            $id = Messages::newMessageId();
+            $args = $this->errors->build($exception, $type, $message, $context, $how, new \DateTimeImmutable('now'), $id, $frames);
+            if ($args === null) {
+                return null;
+            }
+            return $this->enqueue('exception', $args) ? $id : null;
+        } catch (\Throwable $e) {
+            $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'Capturing an error failed: ' . $e->getMessage(), 1, null, $e));
+            return null;
+        }
+    }
+
     private function enqueue(string $type, mixed $message): bool
     {
         try {
@@ -207,8 +340,9 @@ final class GuidelyTrack
             }
             $json = Messages::build($type, $message, new \DateTimeImmutable('now'));
             $bytes = strlen($json);
-            if ($bytes > Messages::MAX_MESSAGE_BYTES) {
-                $this->report(new TrackException(TrackException::MESSAGE_TOO_LARGE, "$type() message is $bytes bytes, more than the " . Messages::MAX_MESSAGE_BYTES . '-byte limit; it was dropped'));
+            $max = $type === 'exception' ? Messages::MAX_EXCEPTION_MESSAGE_BYTES : Messages::MAX_MESSAGE_BYTES;
+            if ($bytes > $max) {
+                $this->report(new TrackException(TrackException::MESSAGE_TOO_LARGE, "$type() message is $bytes bytes, more than the $max-byte limit; it was dropped"));
                 return false;
             }
             if (count($this->queue) >= $this->maxQueueSize) {
