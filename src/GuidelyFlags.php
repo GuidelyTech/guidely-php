@@ -24,7 +24,7 @@ use GuidelyTech\Flags\Http\HttpResponse;
 final class GuidelyFlags
 {
     public const SDK_NAME = 'guidely-php';
-    public const VERSION = '0.4.0';
+    public const VERSION = '0.5.0';
 
     private const PATH_FLAGS = '/api/v1/sdk/flags';
     private const PATH_EVALUATE = '/api/v1/sdk/flags/evaluate';

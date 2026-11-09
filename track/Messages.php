@@ -18,6 +18,8 @@ final class Messages
     public const MAX_MESSAGE_BYTES = 32768;
     /** An `exception` message: up to 64 KB of `detail` plus its 8 KB of properties. */
     public const MAX_EXCEPTION_MESSAGE_BYTES = 81920;
+    /** A `transaction` message: a Sentry transaction event with up to 1,000 spans. */
+    public const MAX_TRANSACTION_MESSAGE_BYTES = 450000;
     public const MAX_EVENT_LENGTH = 120;
     public const MAX_ID_LENGTH = 256;
 
@@ -76,7 +78,7 @@ final class Messages
             throw new \InvalidArgumentException("$type() needs an array argument");
         }
         $ts = $args['timestamp'] ?? null;
-        $presetId = $type === 'exception' && is_string($args['messageId'] ?? null) ? $args['messageId'] : null;
+        $presetId = ($type === 'exception' || $type === 'transaction') && is_string($args['messageId'] ?? null) ? $args['messageId'] : null;
         $m = [
             'type' => $type,
             'messageId' => $presetId ?? self::newMessageId(),
@@ -159,6 +161,17 @@ final class Messages
                 if ($detail !== null) {
                     $m['detail'] = $detail;
                 }
+                break;
+            case 'transaction':
+                $userId = self::id('userId', $args['userId'] ?? null, false);
+                $transaction = $args['transaction'] ?? null;
+                if (!is_array($transaction) || $transaction === [] || array_is_list($transaction)) {
+                    throw new \InvalidArgumentException('transaction needs a transaction event');
+                }
+                if ($userId !== null) {
+                    $m['userId'] = $userId;
+                }
+                $m['transaction'] = $transaction;
                 break;
             default:
                 throw new \InvalidArgumentException("Unknown message type $type");

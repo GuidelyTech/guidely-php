@@ -454,7 +454,7 @@ try {
 }
 $guidely->captureMessage('Stripe webhook retried 3 times', Level::Warning);
 $guidely->setTag('region', 'eu-1');
-$guidely->addBreadcrumb(['category' => 'db.query', 'message' => 'SELECT … FROM orders']);
+$guidely->addBreadcrumb(['category' => 'auth', 'message' => 'Signed in with SSO']);
 ```
 
 * Frames come from `getTrace()` plus the throw site, paired the way Sentry PHP pairs them (each
@@ -482,8 +482,112 @@ public function process(ServerRequestInterface $request, RequestHandlerInterface
 }
 ```
 
-Laravel: call `captureException()` from the exception handler's `reportable()` callback; Symfony:
-from a `kernel.exception` listener. In queue workers call `flush()` after each job.
+Laravel: [`Laravel::instrument()`](#laravel-1) reports what the exception handler reports (or call
+`captureException()` from its `reportable()` callback yourself); Symfony: from a `kernel.exception`
+listener. In queue workers call `flush()` after each job.
+
+## Performance tracing
+
+The same client traces requests, jobs, database queries and outgoing HTTP calls to Monitor →
+Performance, next to traces from the browser SDK, the Node SDK and Sentry SDKs: the Queries and
+Outbound HTTP views, trace waterfalls across services, and N+1 / slow query issues on the Errors
+page ([docs/error-monitoring/performance.md](../../docs/error-monitoring/performance.md)). It is off
+until you set a sample rate:
+
+```php
+use GuidelyTech\Track\TracingOptions;
+
+$guidely = new GuidelyTrack(getenv('GUIDELY_SECRET_KEY'), environment: 'production', tracing: new TracingOptions(
+    tracesSampleRate: 0.2,                 // 20 % of requests and jobs
+    ignoreTransactions: ['GET /health'],
+));
+```
+
+### Laravel
+
+One call in a service provider wires everything through Laravel's own events (Laravel 10+, Octane
+included; the SDK does not depend on Laravel):
+
+```php
+// app/Providers/AppServiceProvider.php
+use GuidelyTech\Track\GuidelyTrack;
+use GuidelyTech\Track\Laravel;
+use GuidelyTech\Track\TracingOptions;
+
+public function register(): void
+{
+    $this->app->singleton(GuidelyTrack::class, fn () => new GuidelyTrack(
+        config('services.guidely.secret'),
+        environment: config('services.guidely.environment', 'production'),
+        tracing: new TracingOptions(tracesSampleRate: 0.2),
+    ));
+}
+
+public function boot(): void
+{
+    Laravel::instrument($this->app->make(GuidelyTrack::class), $this->app);
+}
+```
+
+* **Requests**: an `http.server` transaction per request named by its route (`GET /users/{id}`),
+  with the response status, continuing the caller's `sentry-trace` / `baggage` / `traceparent`
+  (the browser SDK sends them, so a page load and its API calls are one trace). Under Octane, one
+  per request (`RequestReceived` / `RequestTerminated`).
+* **Queries**: every query (`QueryExecuted`) as a `db` span and a `query` breadcrumb, with literal
+  values taken out; bindings are never read.
+* **`Http::`**: requests are `http.client` spans and carry the trace onward (a global Guzzle
+  middleware, Laravel 10.14+).
+* **Queues**: a `queue.process` transaction per job, named by the job class; jobs carry the trace
+  of the request or command that dispatched them (in the payload), so the waterfall shows both.
+* **Errors**: what the exception handler reports (`reportable()`, so `dontReport` still applies),
+  with the request, linked to the trace.
+* Queued messages are flushed after the response is sent (`terminating`) and after each job.
+
+Each part can be turned off: `Laravel::instrument($guidely, $app, queries: false, queue: false)`
+(`requests`, `queries`, `http`, `queue`, `errors`).
+
+### Other frameworks and plain PHP
+
+```php
+$guidely->traceRequest();                    // from $_SERVER (or pass a PSR-7 request)
+$guidely->setRoute('/users/{id}');           // once the router has matched: "GET /users/{id}"
+// … the transaction ends at the end of the request with http_response_code(),
+// or call $guidely->finishRequest($response->getStatusCode()) in an after-response hook.
+
+$guidely->instrumentPdo($pdo);               // every prepared statement the connection executes
+$guidely->recordQuery($sql, $milliseconds, ['system' => 'mysql']); // from your ORM's query event
+
+$stack = GuzzleHttp\HandlerStack::create();
+$stack->push($guidely->guzzleMiddleware());  // http.client spans + trace headers
+$http = new GuzzleHttp\Client(['handler' => $stack]);
+
+$result = $guidely->startSpan(['name' => 'render invoice', 'op' => 'function'], fn (Span $span) => $pdf->render());
+```
+
+* `startSpan($options, $fn)` runs `$fn` in a child of the active span (or a new transaction when
+  none is active), ends it when `$fn` returns and marks it `internal_error` when it throws (the
+  exception is rethrown). `startInactiveSpan()` returns a span you end yourself; `startTransaction()`
+  starts one that stays active until you end it (a job, a command); `getActiveSpan()` returns the
+  current one. Options: `name`, `op`, `attributes`, `startTime`, `parentSpan`, `forceTransaction`, `onlyIfParent`.
+* For a queue message or a request no middleware saw, `continueTrace($headers)` makes the next
+  transaction join the caller's trace; `getTraceHeaders()` gives the headers to pass it on by hand
+  (cURL, a message).
+* `instrumentPdo()` sets the connection's statement class, so it sees `prepare()` + `execute()`
+  (what Doctrine and most query builders run) but not `PDO::query()` / `exec()`; it refuses
+  persistent connections and ones with their own statement class. Use `recordQuery()` for those and
+  for ORM query events.
+* Transactions are `transaction` messages, sent with the end-of-request flush like everything else
+  (at most 450 KB each; a larger one loses its last spans). They carry the scope's tags and user,
+  the request's method, URL and filtered query string, never headers or bodies. Every span counts
+  toward the workspace's spans allowance.
+
+| `TracingOptions` | Default | |
+|---|---|---|
+| `tracesSampleRate` | — | Share of transactions recorded (0–1). Tracing is off unless this or `tracesSampler` is set. |
+| `tracesSampler` | — | `fn (array $ctx): float\|bool` from `name`, `op`, `attributes` and `parentSampled`. Without it, a caller's decision is followed. |
+| `tracePropagationTargets` | every host | Outgoing requests that get trace headers: substrings of the URL, or regular expressions (`'#^https://api\.example\.com#'`). Never Guidely's own API. |
+| `ignoreTransactions` | `[]` | Transactions not sent: substrings of the name or regular expressions. |
+| `maxSpans` | `1000` | Child spans kept per transaction; the rest are counted in `guidely.dropped_spans`. |
 
 ## Development
 

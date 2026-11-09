@@ -29,6 +29,12 @@ use GuidelyTech\Flags\Http\HttpClientInterface;
  * fatal errors — as `exception` messages on the same batch path. They are sent with the end-of-request
  * flush (crashes and fatal errors at once).
  *
+ * With {@see TracingOptions} it traces too (docs/error-monitoring/performance.md): `startSpan()`,
+ * request and job transactions (`traceRequest()`, `startTransaction()`), `db` spans for PDO and
+ * framework query events, `http.client` spans and trace headers through a Guzzle middleware, and
+ * {@see Laravel::instrument()} to wire all of it into a Laravel app. Transactions are `transaction`
+ * messages, sent with the end-of-request flush.
+ *
  * Calls never throw: invalid calls are dropped and reported to `onError` / the logger.
  */
 final class GuidelyTrack
@@ -60,6 +66,7 @@ final class GuidelyTrack
     private bool $closed = false;
     private readonly ?string $appVersion;
     private readonly ErrorCapture $errors;
+    private readonly Tracer $tracer;
 
     /**
      * @param string $secretKey a secret API key (`gly_sk_…`) with the `events:write` scope
@@ -78,6 +85,7 @@ final class GuidelyTrack
      * @param callable(): float|null $random @internal jitter source in [0, 1) (tests)
      * @param string|null $appVersion your app's version, sent with every `track` (a message's own `appVersion` wins)
      * @param ErrorOptions|null $errors error monitoring settings (`beforeSend`, `sampleRate`, `ignoreErrors`, `release`…)
+     * @param TracingOptions|null $tracing performance tracing (`tracesSampleRate`…); off by default
      * @throws \InvalidArgumentException when the key or environment is wrong
      */
     public function __construct(
@@ -98,6 +106,7 @@ final class GuidelyTrack
         ?callable $random = null,
         ?string $appVersion = null,
         ?ErrorOptions $errors = null,
+        ?TracingOptions $tracing = null,
     ) {
         $this->appVersion = Messages::version($appVersion);
         $key = trim($secretKey);
@@ -130,18 +139,35 @@ final class GuidelyTrack
         } : \Closure::fromCallable($sleep);
         $this->random = $random === null ? static fn (): float => mt_rand() / (mt_getrandmax() + 1) : \Closure::fromCallable($random);
         $this->errors = new ErrorCapture($errors ?? new ErrorOptions(), $environment, $this->appVersion, $this->random);
+        // Weak references: neither the tracer nor the shutdown function may keep the client alive past
+        // unset() (its destructor flushes then).
+        $self = \WeakReference::create($this);
+        $this->tracer = new Tracer(
+            $tracing ?? new TracingOptions(),
+            $this->errors,
+            $apiUrl,
+            static function (array $args) use ($self): void {
+                $self->get()?->enqueueTransaction($args);
+            },
+            static function (array $crumb) use ($self): void {
+                $self->get()?->addBreadcrumb($crumb);
+            },
+            $this->random,
+        );
         if ($flushOnShutdown) {
-            // A weak reference: the shutdown function must not keep the client alive past unset()
-            // (its destructor flushes then).
-            $ref = \WeakReference::create($this);
-            register_shutdown_function(static function () use ($ref): void {
-                $ref->get()?->flush();
+            register_shutdown_function(static function () use ($self): void {
+                $client = $self->get();
+                if ($client !== null) {
+                    $client->tracer->finishAll();
+                    $client->flush();
+                }
             });
         }
     }
 
     public function __destruct()
     {
+        $this->tracer->finishAll();
         if ($this->queue !== []) {
             $this->flush();
         }
@@ -195,9 +221,10 @@ final class GuidelyTrack
         }
     }
 
-    /** Flushes, then drops (and reports) later calls. */
+    /** Ends open transactions, flushes, then drops (and reports) later calls. */
     public function close(): void
     {
+        $this->tracer->finishAll();
         $this->flush();
         $this->closed = true;
     }
@@ -304,6 +331,217 @@ final class GuidelyTrack
         }
     }
 
+    // --- tracing --------------------------------------------------------------------------------
+
+    /**
+     * Runs `$fn` in a span — a child of the active span, or the root of a new transaction — and ends
+     * it when `$fn` returns (marked `internal_error` when it throws, which is rethrown). Returns what
+     * `$fn` returns. Ending a transaction's root span sends it with the next flush.
+     *
+     * ```php
+     * $guidely->startSpan(['name' => 'nightly-export', 'op' => 'queue.process'], fn (Span $span) => $export->run());
+     * ```
+     *
+     * @template T
+     * @param array{name: string, op?: string, attributes?: array<string, mixed>, startTime?: float, parentSpan?: Span|null, forceTransaction?: bool, onlyIfParent?: bool} $options
+     * @param callable(Span): T $fn
+     * @return T
+     */
+    public function startSpan(array $options, callable $fn): mixed
+    {
+        return $this->tracer->run($this->safeSpan($options), $fn);
+    }
+
+    /**
+     * A span that is not made active: end it yourself (`$span->end()`).
+     *
+     * @param array{name: string, op?: string, attributes?: array<string, mixed>, startTime?: float, parentSpan?: Span|null, forceTransaction?: bool, onlyIfParent?: bool} $options
+     */
+    public function startInactiveSpan(array $options): Span
+    {
+        return $this->safeSpan($options);
+    }
+
+    /**
+     * A new transaction (a job, a command), active — the parent of later spans — until you end it.
+     * It continues the trace of `continueTrace()` when one was given.
+     *
+     * @param array{name: string, op?: string, attributes?: array<string, mixed>, startTime?: float} $options
+     */
+    public function startTransaction(array $options): Span
+    {
+        $span = $this->safeSpan(['forceTransaction' => true] + $options);
+        $this->tracer->activate($span);
+        return $span;
+    }
+
+    /** The span of the running code (the innermost `startSpan()`, or the request / job transaction). */
+    public function getActiveSpan(): ?Span
+    {
+        return $this->tracer->active();
+    }
+
+    /**
+     * Continues an upstream trace (headers of a queue message or a request): the next transaction
+     * joins it. Pass the headers by name (`sentry-trace`, `baggage`, `traceparent`, any case); an
+     * empty array forgets the previous one. Returns whether they named a trace.
+     *
+     * @param array<string, string|list<string>> $headers
+     */
+    public function continueTrace(array $headers): bool
+    {
+        return $this->tracer->continueTrace($headers);
+    }
+
+    /**
+     * `sentry-trace`, `baggage` and `traceparent` for the active trace, to pass it to another service
+     * by hand (cURL, a queue message). Empty without one.
+     *
+     * @return array{sentry-trace?: string, baggage?: string, traceparent?: string}
+     */
+    public function getTraceHeaders(): array
+    {
+        return $this->tracer->headers();
+    }
+
+    /**
+     * Starts the `http.server` transaction of the request being served — from `$_SERVER` (null), a
+     * PSR-7 request, or `['method' => …, 'url' => …, 'headers' => […]]` — continuing the caller's
+     * trace. It stays active until `finishRequest()` or the end of the request (with
+     * `http_response_code()`). Null when tracing is off or on the CLI.
+     *
+     * @param object|array{method?: string, url?: string, headers?: array<string, string|list<string>>}|null $request
+     */
+    public function traceRequest(object|array|null $request = null): ?Span
+    {
+        try {
+            $r = match (true) {
+                $request === null => RequestContext::fromGlobals()['request'] ?? null,
+                is_object($request) => RequestContext::fromPsr7($request)['request'] ?? null,
+                default => $request,
+            };
+            return is_array($r) ? $this->tracer->startRequest($r) : null;
+        } catch (\Throwable $e) {
+            $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'traceRequest() failed: ' . $e->getMessage(), 1, null, $e));
+            return null;
+        }
+    }
+
+    /** Names the request transaction by the matched route (`/users/{id}` → `GET /users/{id}`). */
+    public function setRoute(string $route): void
+    {
+        $this->tracer->setRoute($route);
+    }
+
+    /** Ends the request transaction with the response's status (default `http_response_code()`). */
+    public function finishRequest(?int $status = null): void
+    {
+        $this->tracer->finishRequest($status);
+    }
+
+    /**
+     * Records a query that ran: a `db` span under the active span (with tracing on) and a `query`
+     * breadcrumb on later errors. For framework query events (Laravel's `DB::listen`, Doctrine
+     * middlewares); literal values are taken out of the SQL and bindings are never read.
+     *
+     * @param array{system?: ?string, database?: ?string, host?: ?string, port?: ?int, rows?: ?int, error?: \Throwable|string|null} $options
+     *     `system`: `mysql`, `postgresql`, `sqlite`… (or a PDO driver name)
+     */
+    public function recordQuery(string $sql, float $durationMs, array $options = []): void
+    {
+        try {
+            $options['system'] = Sql::system(is_string($options['system'] ?? null) ? $options['system'] : null);
+            $this->tracer->query($sql, $durationMs, $options);
+        } catch (\Throwable $e) {
+            $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'recordQuery() failed: ' . $e->getMessage(), 1, null, $e));
+        }
+    }
+
+    /**
+     * Records every prepared statement a PDO connection executes (`prepare()` + `execute()`, what
+     * Doctrine and most query builders run) by giving it a statement class. `PDO::query()` and
+     * `exec()` are not seen: use recordQuery() for those. Returns false (and reports why) for
+     * persistent connections and connections that already use their own statement class.
+     */
+    public function instrumentPdo(\PDO $pdo): bool
+    {
+        try {
+            if ($pdo->getAttribute(\PDO::ATTR_PERSISTENT)) {
+                $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'instrumentPdo(): persistent PDO connections cannot change their statement class; use recordQuery()'));
+                return false;
+            }
+            $current = $pdo->getAttribute(\PDO::ATTR_STATEMENT_CLASS);
+            $class = is_array($current) ? ($current[0] ?? \PDOStatement::class) : \PDOStatement::class;
+            if ($class !== \PDOStatement::class && $class !== TracedPdoStatement::class) {
+                $this->report(new TrackException(TrackException::INVALID_MESSAGE, "instrumentPdo(): the connection already uses its own statement class ($class); use recordQuery()"));
+                return false;
+            }
+            $driver = $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            $system = Sql::system(is_string($driver) ? $driver : null);
+            $tracer = \WeakReference::create($this->tracer);
+            $record = static function (string $sql, float $ms, ?\Throwable $error, ?int $rows) use ($tracer, $system): void {
+                $tracer->get()?->query($sql, $ms, ['system' => $system, 'rows' => $rows, 'error' => $error, 'origin' => 'auto.db.pdo']);
+            };
+            $pdo->setAttribute(\PDO::ATTR_STATEMENT_CLASS, [TracedPdoStatement::class, [$record]]);
+            return true;
+        } catch (\Throwable $e) {
+            $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'instrumentPdo() failed: ' . $e->getMessage(), 1, null, $e));
+            return false;
+        }
+    }
+
+    /**
+     * A Guzzle middleware: an `http.client` span per request (with tracing on) and trace headers on
+     * requests that match `tracePropagationTargets`.
+     *
+     * ```php
+     * $stack = HandlerStack::create();
+     * $stack->push($guidely->guzzleMiddleware());
+     * $client = new Client(['handler' => $stack]);
+     * ```
+     */
+    public function guzzleMiddleware(): \Closure
+    {
+        return $this->tracer->guzzleMiddleware();
+    }
+
+    /** @param array<string, mixed> $options */
+    private function safeSpan(array $options): Span
+    {
+        try {
+            return $this->tracer->create($options);
+        } catch (\Throwable $e) {
+            $this->report(new TrackException(TrackException::INVALID_MESSAGE, 'Starting a span failed: ' . $e->getMessage(), 1, null, $e));
+            return $this->tracer->create(['name' => 'span', 'parentSpan' => null, 'onlyIfParent' => true]);
+        }
+    }
+
+    /**
+     * Queues a finished transaction; one too large for a batch loses its last spans until it fits.
+     *
+     * @internal called by the tracer
+     * @param array{messageId: string, timestamp: float, userId?: ?string, transaction: array<string, mixed>} $args
+     */
+    public function enqueueTransaction(array $args): void
+    {
+        $tx = $args['transaction'];
+        $bytes = ErrorCapture::bytes($tx) + 200;
+        while ($bytes > Messages::MAX_TRANSACTION_MESSAGE_BYTES && is_array($tx['spans'] ?? null) && $tx['spans'] !== []) {
+            $n = count($tx['spans']);
+            $keep = (int) floor($n * min(0.9, Messages::MAX_TRANSACTION_MESSAGE_BYTES / $bytes));
+            $tx['spans'] = array_slice($tx['spans'], 0, $keep);
+            $dropped = ($tx['contexts']['trace']['data']['guidely.dropped_spans'] ?? 0) + ($n - $keep);
+            $tx['contexts']['trace']['data']['guidely.dropped_spans'] = $dropped;
+            $bytes = ErrorCapture::bytes($tx) + 200;
+        }
+        $args['transaction'] = $tx;
+        $args['timestamp'] = Messages::toDateTime($args['timestamp']);
+        if (($args['userId'] ?? null) === null) {
+            unset($args['userId']);
+        }
+        $this->enqueue('transaction', $args);
+    }
+
     /**
      * Builds and queues one error. Never throws.
      *
@@ -320,6 +558,11 @@ final class GuidelyTrack
                 return null;
             }
             $id = Messages::newMessageId();
+            // Errors raised inside a trace link to it (the trace page lists them, the issue links back).
+            $trace = $this->tracer->errorContext();
+            if ($trace !== null && !isset($context['contexts']['trace'])) {
+                $context['contexts'] = (is_array($context['contexts'] ?? null) ? $context['contexts'] : []) + ['trace' => $trace];
+            }
             $args = $this->errors->build($exception, $type, $message, $context, $how, new \DateTimeImmutable('now'), $id, $frames);
             if ($args === null) {
                 return null;
@@ -340,7 +583,11 @@ final class GuidelyTrack
             }
             $json = Messages::build($type, $message, new \DateTimeImmutable('now'));
             $bytes = strlen($json);
-            $max = $type === 'exception' ? Messages::MAX_EXCEPTION_MESSAGE_BYTES : Messages::MAX_MESSAGE_BYTES;
+            $max = match ($type) {
+                'exception' => Messages::MAX_EXCEPTION_MESSAGE_BYTES,
+                'transaction' => Messages::MAX_TRANSACTION_MESSAGE_BYTES,
+                default => Messages::MAX_MESSAGE_BYTES,
+            };
             if ($bytes > $max) {
                 $this->report(new TrackException(TrackException::MESSAGE_TOO_LARGE, "$type() message is $bytes bytes, more than the $max-byte limit; it was dropped"));
                 return false;

@@ -136,6 +136,39 @@ final class ErrorCapture
         }
     }
 
+    public function environment(): ?string
+    {
+        return $this->environment;
+    }
+
+    public function release(): ?string
+    {
+        return $this->release;
+    }
+
+    public function serverName(): ?string
+    {
+        return $this->options->serverName;
+    }
+
+    /** @return array<string, string> the scope's tags, as errors send them */
+    public function scopeTags(): array
+    {
+        return self::tags($this->tags);
+    }
+
+    /** @return array<string, string>|null */
+    public function scopeUser(): ?array
+    {
+        return $this->user;
+    }
+
+    /** @return array<string, array<string, mixed>> */
+    public function scopeContexts(): array
+    {
+        return $this->contexts;
+    }
+
     public function breadcrumbCount(): int
     {
         return count($this->breadcrumbs);
@@ -455,12 +488,12 @@ final class ErrorCapture
         return false;
     }
 
-    private static function runtimeContext(): array
+    public static function runtimeContext(): array
     {
         return ['name' => 'php', 'version' => PHP_VERSION, 'sapi' => PHP_SAPI];
     }
 
-    private static function osContext(): array
+    public static function osContext(): array
     {
         return ['name' => PHP_OS_FAMILY, 'version' => php_uname('r'), 'machine' => php_uname('m')];
     }
